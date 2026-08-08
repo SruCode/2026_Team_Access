@@ -1,7 +1,6 @@
 import streamlit as st
 import cv2
 import numpy as np
-import mediapipe as mp
 import time
 
 # Custom Modules Import
@@ -33,10 +32,17 @@ with col2:
     st.subheader("Aggregated Safety Report")
     report_box = st.empty()
 
-# MediaPipe Setup
-mp_pose = mp.solutions.pose
+# MediaPipe Setup (Python 3.14 Compatible)
+import mediapipe as mp
+
+try:
+    import mediapipe.solutions.pose as mp_pose
+    import mediapipe.solutions.drawing_utils as mp_drawing
+except ModuleNotFoundError:
+    from mediapipe.python.solutions import pose as mp_pose
+    from mediapipe.python.solutions import drawing_utils as mp_drawing
+
 pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
-mp_drawing = mp.solutions.drawing_utils
 hazard = HazardZone()
 
 def calculate_angle(a, b, c):
