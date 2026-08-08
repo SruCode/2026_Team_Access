@@ -3,82 +3,41 @@ import cv2
 import numpy as np
 import mediapipe as mp
 import time
-from datetime import datetime
-import pandas as pd
 
-# -------------------------------------------------------------------
-# 1. Page Configuration
-# -------------------------------------------------------------------
-st.set_page_config(
-    page_title="ErgoGuard AI - Safety Dashboard",
-    page_icon="🛡️",
-    layout="wide"
-)
+# Custom Modules Import
+from hazard_checker import HazardZone
+from logger import init_log_file, log_incident
+from report_generator import generate_summary
 
-# Initialize Incident Log in Session State (persists across redraws)
-if "incident_log" not in st.session_state:
-    st.session_state.incident_log = []
+# Page Setup
+st.set_page_config(page_title="ErgoGuard AI", layout="wide")
+init_log_file()
 
-# -------------------------------------------------------------------
-# 2. Sidebar Controls (Min 30–75)
-# -------------------------------------------------------------------
-st.sidebar.title("🛡️ ErgoGuard Controls")
-st.sidebar.markdown("---")
+st.sidebar.title("🛡️ ErgoGuard AI Controls")
+hazard_threshold = st.sidebar.slider("Back Angle Risk Limit (Deg)", 90, 160, 130)
 
-# Control 1: Video Source Selector
-video_source_option = st.sidebar.radio(
-    "Select Input Source:",
-    ("Webcam Feed", "Pre-recorded Demo Video")
-)
+st.title("Worker Safety & Ergonomic Risk Monitoring System")
 
-# Control 2: Risk Threshold Sliders
-st.sidebar.subheader("Threshold Configuration")
-back_threshold = st.sidebar.slider(
-    "Ergonomic Back Angle Limit (°)", 
-    min_value=90, 
-    max_value=160, 
-    value=130, 
-    help="Angles below this value trigger a Poor Posture warning."
-)
+# Layout Columns
+col1, col2 = st.columns([2, 1])
 
-enable_face_blur = st.sidebar.checkbox("Enable Privacy Mode (Blur Face)", value=True)
+with col1:
+    st.subheader("Live Feed & Hazard Geofencing")
+    frame_placeholder = st.empty()
 
-# Cooldown to avoid spamming log entries (in seconds)
-LOG_COOLDOWN = 2 
-if "last_log_time" not in st.session_state:
-    st.session_state.last_log_time = 0
-
-# -------------------------------------------------------------------
-# 3. Main Dashboard Layout (Min 0–30)
-# -------------------------------------------------------------------
-st.title("🛡️ ErgoGuard AI — Real-Time Safety & Ergonomic Monitor")
-st.caption("Computer Vision Powered Workstation Risk Assessment System")
-
-# Create 2 Main Columns
-col_video, col_metrics = st.columns([2, 1])
-
-with col_video:
-    st.subheader("📹 Live Monitor")
-    video_placeholder = st.empty()
-
-with col_metrics:
-    st.subheader("📊 Live Metrics")
-    kpi_angle = st.metric(label="Back Angle", value="-- °")
+with col2:
+    st.subheader("Real-Time Analytics")
+    kpi_angle = st.empty()
     kpi_status = st.empty()
-    kpi_score = st.metric(label="Safety Score", value="100%")
+    st.markdown("---")
+    st.subheader("Aggregated Safety Report")
+    report_box = st.empty()
 
-st.markdown("---")
-
-# Incident Log Table Section (Min 100–120)
-st.subheader("📋 Real-Time Incident Log")
-table_placeholder = st.empty()
-
-# -------------------------------------------------------------------
-# 4. Helper Functions (Person 1 & 2 Core Logic Hooked Here)
-# -------------------------------------------------------------------
+# MediaPipe Setup
 mp_pose = mp.solutions.pose
 pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 mp_drawing = mp.solutions.drawing_utils
+hazard = HazardZone()
 
 def calculate_angle(a, b, c):
     a, b, c = np.array(a), np.array(b), np.array(c)
@@ -86,106 +45,71 @@ def calculate_angle(a, b, c):
     angle = np.abs(radians * 180.0 / np.pi)
     return 360 - angle if angle > 180.0 else angle
 
-def log_incident(incident_type, angle_val):
-    current_time = time.time()
-    # Log only if cooldown period has passed
-    if current_time - st.session_state.last_log_time > LOG_COOLDOWN:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        st.session_state.incident_log.append({
-            "Timestamp": timestamp,
-            "Violation Event": incident_type,
-            "Angle Registered": f"{angle_val}°" if angle_val else "N/A",
-            "Severity": "High" if "HAZARD" in incident_type else "Medium"
-        })
-        st.session_state.last_log_time = current_time
+# Cooldown timer to prevent logging multiple times per second
+last_log_time = 0
 
-# -------------------------------------------------------------------
-# 5. Video Loop Execution (Min 75–100)
-# -------------------------------------------------------------------
-if video_source_option == "Webcam Feed":
-    cap = cv2.VideoCapture(0)
-else:
-    # Make sure to have a demo.mp4 in your directory or replace path
-    cap = cv2.VideoCapture("demo.mp4") 
-
-safety_violations_count = 0
+cap = cv2.VideoCapture(0)
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
-        st.warning("Video stream ended or camera unreachable.")
+        st.error("Camera feed disconnected.")
         break
 
-    # Convert frame BGR to RGB
-    image = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = pose.process(image)
-    
-    # Draw Hazard Boundary Box on frame (x1=350, y1=100, x2=550, y2=350)
-    h, w, _ = image.shape
-    cv2.rectangle(image, (int(w*0.6), int(h*0.2)), (int(w*0.9), int(h*0.7)), (255, 0, 0), 2)
-    cv2.putText(image, "DANGER ZONE", (int(w*0.6) + 10, int(h*0.2) - 10), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 0, 0), 2)
+    h, w, _ = frame.shape
+    image_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    results = pose.process(image_rgb)
+    image = cv2.cvtColor(image_rgb, cv2.COLOR_RGB2BGR)
 
-    status_str = "SAFE POSTURE"
-    current_angle = 180
+    # Draw Danger Zone Rectangle (Red)
+    cv2.rectangle(image, (hazard.x_min, hazard.y_min), (hazard.x_max, hazard.y_max), (0, 0, 255), 2)
+    cv2.putText(image, "DANGER ZONE", (hazard.x_min + 10, hazard.y_min - 10),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+
+    status = "SAFE"
+    angle = 180
+    current_time = time.time()
 
     if results.pose_landmarks:
         landmarks = results.pose_landmarks.landmark
-
-        # Extract joints for posture angle
+        
+        # Coordinates for Ergonomics
         shoulder = [landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].x, landmarks[mp_pose.PoseLandmark.LEFT_SHOULDER.value].y]
         hip = [landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].x, landmarks[mp_pose.PoseLandmark.LEFT_HIP.value].y]
         knee = [landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].x, landmarks[mp_pose.PoseLandmark.LEFT_KNEE.value].y]
         
-        current_angle = int(calculate_angle(shoulder, hip, knee))
+        angle = int(calculate_angle(shoulder, hip, knee))
 
-        # Check Privacy Toggle (Blur Head Area)
-        if enable_face_blur:
-            nose = landmarks[mp_pose.PoseLandmark.NOSE.value]
-            nx, ny = int(nose.x * w), int(nose.y * h)
-            x1, y1 = max(0, nx - 60), max(0, ny - 60)
-            x2, y2 = min(w, nx + 60), min(h, ny + 60)
-            if x2 > x1 and y2 > y1:
-                image[y1:y2, x1:x2] = cv2.GaussianBlur(image[y1:y2, x1:x2], (51, 51), 0)
+        # Check Wrist for Danger Zone Entry
+        wrist_x = int(landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value].x * w)
+        wrist_y = int(landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value].y * h)
 
-        # 1. Posture Check
-        if current_angle < back_threshold:
-            status_str = "POOR ERGONOMICS DETECTED"
-            log_incident("POOR POSTURE (BAD BEND)", current_angle)
-            safety_violations_count += 1
+        if hazard.is_inside(wrist_x, wrist_y):
+            status = "HAZARD ZONE BREACH!"
+            if current_time - last_log_time > 2: # Log every 2 seconds
+                log_incident("Hazard Zone Breach", "HIGH", angle)
+                last_log_time = current_time
+        elif angle < hazard_threshold:
+            status = "POOR ERGONOMICS DETECTED"
+            if current_time - last_log_time > 2:
+                log_incident("Poor Ergonomics", "MEDIUM", angle)
+                last_log_time = current_time
 
-        # 2. Hazard Zone Breach Check (Right Wrist inside bounding box)
-        rw_x = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value].x
-        rw_y = landmarks[mp_pose.PoseLandmark.RIGHT_WRIST.value].y
-        if 0.6 < rw_x < 0.9 and 0.2 < rw_y < 0.7:
-            status_str = "HAZARD ZONE BREACH!"
-            log_incident("HAZARD ZONE VIOLATION", current_angle)
-            safety_violations_count += 1
-
-        # Draw skeleton overlay
         mp_drawing.draw_landmarks(image, results.pose_landmarks, mp_pose.POSE_CONNECTIONS)
 
-    # Update Dashboard Components
-    video_placeholder.image(image, channels="RGB", use_container_width=True)
-    kpi_angle.metric(label="Back Angle", value=f"{current_angle}°")
-
-    # Dynamic status pill rendering
-    if status_str == "SAFE POSTURE":
-        kpi_status.success("🟢 STATUS: NORMAL")
-    elif "ERGONOMICS" in status_str:
-        kpi_status.warning(f"⚠️ {status_str}")
+    # Render Streamlit UI
+    frame_rgb = cv2.cvtColor(image, cv2.COLOR_BGR2RGB)
+    frame_placeholder.image(frame_rgb, channels="RGB", use_container_width=True)
+    
+    kpi_angle.metric(label="Back Angle", value=f"{angle}°")
+    
+    if status == "SAFE":
+        kpi_status.success(f"Status: {status}")
     else:
-        kpi_status.error(f"🚨 {status_str}")
+        kpi_status.error(f"Status: {status}")
 
-    # Safety Score calculation
-    score = max(0, 100 - (len(st.session_state.incident_log) * 5))
-    kpi_score.metric(label="Shift Safety Score", value=f"{score}%")
-
-    # Render Incident Table
-    if st.session_state.incident_log:
-        df = pd.DataFrame(st.session_state.incident_log)
-        table_placeholder.dataframe(df.iloc[::-1], use_container_width=True) # newest first
-    else:
-        table_placeholder.info("No violations logged yet.")
+    # Display Live Analytics Summary
+    summary = generate_summary()
+    report_box.json(summary)
 
 cap.release()
